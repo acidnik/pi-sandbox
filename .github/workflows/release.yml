@@ -10,10 +10,12 @@ jobs:
   publish:
     runs-on: ubuntu-latest
 
-    # `id-token: write` is required for npm provenance attestation.
+    # Required for both npm provenance attestation AND OIDC trusted publishing.
+    # Without `id-token: write` the runner can't request the OIDC token that
+    # npm uses to verify the workflow identity, and provenance signing fails.
     permissions:
-      contents: read
-      id-token: write
+      id-token: write  # Essential for OIDC authentication
+      contents: read   # Standard for checking out code
 
     steps:
       - name: Checkout code
