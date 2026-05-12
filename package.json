@@ -37,6 +37,10 @@
     ],
     "image": "./screenshots/sandbox-configure.png"
   },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit"
