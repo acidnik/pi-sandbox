@@ -33,13 +33,18 @@ import {
   type ScopeChoice,
   type ScopeOption,
   type ScopeSituation,
+  DEFAULT_RECORD_VALUE,
   FIELDS,
   addListEntry,
+  addRecordKey,
   buildScopeOptions,
   formatFieldValue,
   getField,
+  recordKeys,
+  recordValue,
   removeField,
   removeListEntry,
+  removeRecordKey,
   setField,
   toggleBool,
 } from "./wizard.ts";
@@ -296,6 +301,10 @@ async function editorLoop(
         draft = await runListEditor(ctx, deps, scope, draft, field);
         continue;
       }
+      if (field.kind === "record") {
+        draft = await runRecordEditor(ctx, deps, scope, draft, field);
+        continue;
+      }
       if (field.kind === "number" || field.kind === "string") {
         const cur = getField(draft, field);
         const input = await ctx.ui.input(`Set ${field.label}:`, cur === undefined ? "" : String(cur));
@@ -497,6 +506,118 @@ async function runListEditor(
     }
     if (action.kind === "delete") {
       current = removeListEntry(current, field, action.index);
+      continue;
+    }
+  }
+}
+
+/**
+ * Editor for `Record<string, string[]>` fields (currently just
+ * `ignoreViolations`).
+ *
+ * The UX intentionally only exposes add/remove of the top-level key (the
+ * command-prefix pattern). New keys are seeded with `["*"]`, which matches
+ * every path the prefix could emit — the common case the user wants when
+ * silencing a noisy command.
+ *
+ * Existing values are displayed beside their key so the user can see when
+ * they aren't the default; editing the value array itself is left to raw
+ * JSON, matching the philosophy used elsewhere for niche nested shapes.
+ */
+async function runRecordEditor(
+  ctx: ExtensionCommandContext,
+  _deps: WizardConfigDeps,
+  _scope: ScopeChoice,
+  draft: Partial<SandboxConfig>,
+  field: FieldDef,
+): Promise<Partial<SandboxConfig>> {
+  let current = draft;
+
+  while (true) {
+    const action = await ctx.ui.custom<
+      | { kind: "back" }
+      | { kind: "add" }
+      | { kind: "delete"; key: string }
+    >((tui, theme, _kb, done) => {
+      let selectedIndex = 0;
+
+      function keys(): string[] {
+        return recordKeys(current, field);
+      }
+
+      return {
+        render(width: number): string[] {
+          const lines: string[] = [];
+          lines.push(truncateToWidth(theme.fg("accent", `Editing ${field.label}`), width));
+          lines.push(
+            truncateToWidth(
+              theme.fg("dim", `New prefixes default to ${JSON.stringify(DEFAULT_RECORD_VALUE)}`),
+              width,
+            ),
+          );
+          lines.push("");
+          const ks = keys();
+          if (ks.length === 0) {
+            lines.push(truncateToWidth(theme.fg("dim", "  (empty)"), width));
+          } else {
+            // Clamp selection in case the list shrank after a delete.
+            if (selectedIndex >= ks.length) selectedIndex = ks.length - 1;
+            for (let i = 0; i < ks.length; i++) {
+              const k = ks[i] ?? "";
+              const value = recordValue(current, field, k);
+              const prefix = i === selectedIndex ? " → " : "   ";
+              const valueStr = theme.fg("dim", JSON.stringify(value));
+              lines.push(truncateToWidth(`${prefix}${k}  ${valueStr}`, width));
+            }
+          }
+          lines.push("");
+          lines.push(truncateToWidth(theme.fg("dim", "↑↓ navigate  a add prefix  d delete  esc/b back"), width));
+          return lines;
+        },
+
+        handleInput(data: string): void {
+          if (matchesKey(data, Key.escape) || data === "b") {
+            done({ kind: "back" });
+            return;
+          }
+          if (matchesKey(data, Key.up)) {
+            selectedIndex = Math.max(0, selectedIndex - 1);
+            tui.requestRender();
+            return;
+          }
+          if (matchesKey(data, Key.down)) {
+            selectedIndex = Math.min(Math.max(0, keys().length - 1), selectedIndex + 1);
+            tui.requestRender();
+            return;
+          }
+          if (data === "a") {
+            done({ kind: "add" });
+            return;
+          }
+          if (data === "d") {
+            const ks = keys();
+            const k = ks[selectedIndex];
+            if (k !== undefined) done({ kind: "delete", key: k });
+            return;
+          }
+        },
+
+        invalidate(): void {},
+      };
+    });
+
+    if (!action || action.kind === "back") return current;
+    if (action.kind === "add") {
+      const value = await ctx.ui.input(
+        `Add prefix to ${field.label} (value defaults to ${JSON.stringify(DEFAULT_RECORD_VALUE)}):`,
+        "",
+      );
+      if (value === undefined) continue;
+      current = addRecordKey(current, field, value);
+      continue;
+    }
+    if (action.kind === "delete") {
+      current = removeRecordKey(current, field, action.key);
       continue;
     }
   }
