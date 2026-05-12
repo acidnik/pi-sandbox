@@ -77,12 +77,24 @@ describe("ensureDefaultConfig", () => {
     // @anthropic-ai/sandbox-runtime docs: deny reads under user home dirs,
     // re-allow cwd via ".".
     expect(saved.network?.allowedDomains).toEqual([]);
-    expect(saved.filesystem?.denyRead).toEqual(["/Users", "/home"]);
+    // Deny user home trees plus pi's own auth.json + mcp-oauth dir. The
+    // latter two are re-denied on top of the `~/.pi` allowRead carve-out;
+    // sandbox-runtime gives file-level denyRead precedence over a
+    // directory-level allowRead ancestor.
+    expect(saved.filesystem?.denyRead).toEqual([
+      "/Users",
+      "/home",
+      "~/.pi/agent/auth.json",
+      "~/.pi/agent/mcp-oauth",
+    ]);
     // `.` re-allows the workspace, `~/.pi` re-allows the extension install
     // tree (apply-seccomp binary must be visible inside bwrap).
     expect(saved.filesystem?.allowRead).toEqual([".", "~/.pi"]);
     expect(saved.filesystem?.allowWrite).toEqual(["."]);
-    expect(saved.filesystem?.denyWrite).toEqual([]);
+    expect(saved.filesystem?.denyWrite).toEqual([
+      "~/.pi/agent/auth.json",
+      "~/.pi/agent/mcp-oauth",
+    ]);
   });
   test("does not overwrite existing default.json", () => {
     const p = getConfigPaths(HOME);

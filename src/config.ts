@@ -65,6 +65,14 @@ export function getConfigPaths(home: string = homedir()): ConfigPaths {
  * fails to start with "apply-seccomp: No such file or directory". System
  * paths (/usr, /lib, /etc, ...) remain readable so common tooling works.
  *
+ * Secrets re-denied on top of the `~/.pi` re-allow:
+ *  - `~/.pi/agent/auth.json` — pi's primary auth token store
+ *  - `~/.pi/agent/mcp-oauth` — MCP OAuth tokens directory
+ *
+ * @anthropic-ai/sandbox-runtime gives file-level denyRead precedence over
+ * directory-level allowRead ancestors, so these specific paths stay
+ * blocked even though their parent `~/.pi` directory is re-allowed.
+ *
  * Every network access prompts because allowedDomains is empty.
  */
 export const BUILTIN_DEFAULT_CONFIG: SandboxConfig = {
@@ -74,10 +82,10 @@ export const BUILTIN_DEFAULT_CONFIG: SandboxConfig = {
     deniedDomains: [],
   },
   filesystem: {
-    denyRead: ["/Users", "/home"],
+    denyRead: ["/Users", "/home", "~/.pi/agent/auth.json", "~/.pi/agent/mcp-oauth"],
     allowRead: [".", "~/.pi"],
     allowWrite: ["."],
-    denyWrite: [],
+    denyWrite: ["~/.pi/agent/auth.json", "~/.pi/agent/mcp-oauth"],
   },
 };
 
