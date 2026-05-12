@@ -70,6 +70,20 @@ export function computeSituation(deps: WizardConfigDeps, projects: ProjectsConfi
  *  - "project-new"      → seeds projects.json[key] from sourceKey-or-default,
  *                         then on save writes projects.json[key] = draft.
  */
+/**
+ * A non-scope action that the user can pick from the top of the scope picker.
+ * Used by /sandbox to expose "Disable sandbox" / "Enable sandbox" as the
+ * first option, so hitting Enter immediately at the menu toggles the
+ * sandbox state without entering the editor.
+ */
+export interface LeadAction {
+  id: string;
+  label: string;
+  hint: string;
+  /** Optional theme colour for the label (defaults to no special colour). */
+  emphasis?: "accent" | "warning" | "error" | "success";
+}
+
 export interface WizardOptions {
   /**
    * Optional summary lines rendered above the scope picker. Used by
@@ -77,13 +91,23 @@ export interface WizardOptions {
    * which scope to edit.
    */
   summary?: readonly string[];
+  /**
+   * Optional action rows rendered ABOVE the scope options. If the user picks
+   * one, runWizard returns immediately with the action id (no editor opens).
+   */
+  leadActions?: readonly LeadAction[];
 }
+
+export type WizardResult =
+  | { kind: "cancelled" }
+  | { kind: "edited" }
+  | { kind: "lead-action"; id: string };
 
 export async function runWizard(
   ctx: ExtensionCommandContext,
   deps: WizardConfigDeps,
   opts: WizardOptions = {},
-): Promise<void> {
+): Promise<WizardResult> {
   const projects = readProjects(deps.home);
   const defaults = readDefault(deps.home);
   const situation = computeSituation(deps, projects);
@@ -92,8 +116,10 @@ export async function runWizard(
     projectsPath: deps.paths.projectsPath,
   });
 
-  const scope = await pickScope(ctx, options, opts.summary ?? []);
-  if (!scope) return;
+  const pickResult = await pickScope(ctx, options, opts.summary ?? [], opts.leadActions ?? []);
+  if (!pickResult) return { kind: "cancelled" };
+  if (pickResult.kind === "lead-action") return { kind: "lead-action", id: pickResult.id };
+  const scope = pickResult.scope;
 
   // Build the initial draft based on scope choice.
   let draft: Partial<SandboxConfig>;
@@ -115,26 +141,45 @@ export async function runWizard(
   }
 
   await editorLoop(ctx, deps, scope.choice, draft);
+  return { kind: "edited" };
 }
 
+type PickResult =
+  | { kind: "scope"; scope: ScopeOptionT }
+  | { kind: "lead-action"; id: string };
+
 /**
- * Scope picker rendered as a custom TUI component so we can show the
- * /sandbox summary lines above the selectable options.
+ * Scope picker rendered as a custom TUI component. Renders, in order:
+ *   1. Summary lines (effective config), if any
+ *   2. A separator (if both summary and rows are present)
+ *   3. Lead-action rows (e.g. "Disable sandbox") — selected first, so
+ *      hitting Enter immediately at the menu fires the first one
+ *   4. Scope options (Edit project / Create new / Edit default)
  *
- * Auto-skips when there's only one option (returns it directly). In practice
- * buildScopeOptions always returns at least 2 options today, but the
- * skip-path stays so we never strand the user on a degenerate picker.
+ * Returns either a scope option or a lead-action id. Esc cancels.
  */
 async function pickScope(
   ctx: ExtensionCommandContext,
   options: readonly ScopeOptionT[],
   summary: readonly string[],
-): Promise<ScopeOptionT | undefined> {
-  if (options.length === 0) return undefined;
-  if (options.length === 1) return options[0];
+  leadActions: readonly LeadAction[],
+): Promise<PickResult | undefined> {
+  if (options.length === 0 && leadActions.length === 0) return undefined;
 
-  const result = await ctx.ui.custom<ScopeOptionT>((tui, theme, _kb, done) => {
+  const result = await ctx.ui.custom<PickResult | null>((tui, theme, _kb, done) => {
     let selectedIndex = 0;
+    const totalRows = leadActions.length + options.length;
+
+    function resolveSelection(): PickResult | null {
+      if (selectedIndex < leadActions.length) {
+        const action = leadActions[selectedIndex];
+        if (!action) return null;
+        return { kind: "lead-action", id: action.id };
+      }
+      const opt = options[selectedIndex - leadActions.length];
+      if (!opt) return null;
+      return { kind: "scope", scope: opt };
+    }
 
     return {
       render(width: number): string[] {
@@ -147,13 +192,30 @@ async function pickScope(
           lines.push(truncateToWidth(theme.fg("dim", "─".repeat(Math.max(20, Math.min(width, 60)))), width));
           lines.push("");
         }
-        lines.push(truncateToWidth(theme.fg("accent", "Configure — pick what to edit:"), width));
+        lines.push(truncateToWidth(theme.fg("accent", "Sandbox — pick an action:"), width));
         lines.push("");
 
+        // Lead actions first.
+        for (let i = 0; i < leadActions.length; i++) {
+          const a = leadActions[i];
+          if (!a) continue;
+          const isSel = i === selectedIndex;
+          const prefix = isSel ? " → " : "   ";
+          const label = a.emphasis ? theme.fg(a.emphasis, a.label) : a.label;
+          const styledLabel = isSel ? theme.fg("accent", a.label) : label;
+          lines.push(truncateToWidth(`${prefix}${styledLabel}`, width));
+          lines.push(truncateToWidth(`     ${theme.fg("dim", a.hint)}`, width));
+        }
+        if (leadActions.length > 0 && options.length > 0) {
+          lines.push("");
+        }
+
+        // Scope options.
         for (let i = 0; i < options.length; i++) {
           const opt = options[i];
           if (!opt) continue;
-          const isSel = i === selectedIndex;
+          const rowIdx = leadActions.length + i;
+          const isSel = rowIdx === selectedIndex;
           const prefix = isSel ? " → " : "   ";
           const label = isSel ? theme.fg("accent", opt.label) : opt.label;
           lines.push(truncateToWidth(`${prefix}${label}`, width));
@@ -167,7 +229,7 @@ async function pickScope(
 
       handleInput(data: string): void {
         if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
-          done(undefined as unknown as ScopeOptionT);
+          done(null);
           return;
         }
         if (matchesKey(data, Key.up)) {
@@ -176,13 +238,12 @@ async function pickScope(
           return;
         }
         if (matchesKey(data, Key.down)) {
-          selectedIndex = Math.min(options.length - 1, selectedIndex + 1);
+          selectedIndex = Math.min(totalRows - 1, selectedIndex + 1);
           tui.requestRender();
           return;
         }
         if (matchesKey(data, Key.enter)) {
-          const opt = options[selectedIndex];
-          if (opt) done(opt);
+          done(resolveSelection());
           return;
         }
       },

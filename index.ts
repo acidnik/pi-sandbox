@@ -558,15 +558,14 @@ export default function (pi: ExtensionAPI): void {
 
   // ── commands ───────────────────────────────────────────────────────────────
 
-  // Enable/disable are intentionally not registered as slash commands —
-  // shift+tab is the single entry point for toggling. /sandbox-configure
-  // still exists for editing config and /sandbox for inspection.
-
-  // /sandbox is the single inspection-and-configure command. It opens the
-  // wizard with the current effective-config summary rendered above the
-  // scope picker, so the user always sees what's enforced before editing.
+  // /sandbox is the single inspection + configure + toggle command. It
+  // opens the wizard with the current effective-config summary rendered
+  // above the scope picker, plus a "Disable sandbox" / "Enable sandbox" row
+  // as the first selectable option. Hitting Enter immediately at the menu
+  // toggles the sandbox state without entering the editor; arrow down past
+  // it to edit a project or the default config.
   pi.registerCommand("sandbox", {
-    description: "Show current sandbox config + open the configure wizard",
+    description: "Inspect, toggle, or configure the sandbox",
     handler: async (_args, ctx) => {
       const { base, projectKey, effective } = loadEffective(ctx.cwd);
       const summary = buildSummaryLines({
@@ -578,30 +577,43 @@ export default function (pi: ExtensionAPI): void {
         effective,
         session,
       });
-      await runWizard(ctx, { cwd: ctx.cwd, home, paths }, { summary });
-      // Re-apply config after editing so changes take effect immediately.
+
+      const isEnabled = flags.enabled.value;
+      const result = await runWizard(
+        ctx,
+        { cwd: ctx.cwd, home, paths },
+        {
+          summary,
+          leadActions: [
+            {
+              id: "toggle",
+              label: isEnabled ? "Disable sandbox" : "Enable sandbox",
+              hint: isEnabled
+                ? "Tear down the OS-level sandbox and clear session allowances"
+                : "Initialize the OS-level sandbox for this session",
+              emphasis: isEnabled ? "error" : "success",
+            },
+          ],
+        },
+      );
+
+      if (result.kind === "lead-action" && result.id === "toggle") {
+        if (isEnabled) {
+          await fullDisable(ctx);
+          ctx.ui.notify("Sandbox disabled", "info");
+        } else {
+          const ok = await initSandbox(ctx.cwd, ctx);
+          if (ok) {
+            updateStatus(ctx);
+            ctx.ui.notify("Sandbox enabled", "info");
+          }
+        }
+        return;
+      }
+
+      // Editor flow (or cancelled). Re-apply config so any edits take effect.
       if (flags.initialized.value) await reinitialize(ctx.cwd, ctx);
       updateStatus(ctx);
-    },
-  });
-
-  // ── shift+tab toggle ─────────────────────────────────────────────────
-  //
-  // Toggles the sandbox on/off. The previous binding of shift+tab
-  // (app.thinking.cycle) has been freed via the user's keybindings.json.
-  pi.registerShortcut("shift+tab", {
-    description: "Toggle sandbox on/off",
-    handler: async (ctx) => {
-      if (flags.enabled.value) {
-        await fullDisable(ctx);
-        ctx.ui.notify("Sandbox disabled", "info");
-      } else {
-        const ok = await initSandbox(ctx.cwd, ctx);
-        if (ok) {
-          updateStatus(ctx);
-          ctx.ui.notify("Sandbox enabled", "info");
-        }
-      }
     },
   });
 }

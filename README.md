@@ -14,12 +14,24 @@ Heavily inspired by [`pi-sandbox`](https://github.com/carderne/pi-sandbox) by Ch
 | Config storage | `.pi/sandbox.json` (per project) + `~/.pi/agent/sandbox.json` (global) | `~/.pi/agent/sandbox/default.json` + `~/.pi/agent/sandbox/projects.json` (single user-level dir, no per-project files) |
 | Config matching | Merged global + project | Longest-prefix match, no merging — most specific wins |
 | Configure in pi | None — edit JSON by hand | **`/sandbox` TUI wizard** with current-config summary, scope picker, and per-field editor |
-| Toggle | `/sandbox-enable`, `/sandbox-disable` slash commands | **shift+tab** to flip on/off, with `Sandbox: disabled` in red in the footer (slash commands removed in favour of the shortcut) |
+| Toggle | `/sandbox-enable`, `/sandbox-disable` slash commands | **First option in `/sandbox`** is "Disable sandbox" / "Enable sandbox" — run `/sandbox`, hit Enter, done. No shortcut to remember, no built-in keybinding to free up. The footer shows `Sandbox: disabled` in red when off. |
 | Permission prompt | 4 options: abort / session / project / global | **5 options when in a subfolder** of an existing project key: adds "Allow for this project (new config)" which copies the parent entry under the cwd key |
 | Disable cleanliness | Async reset fire-and-forget; session lists keep state across re-enable; env mutations not restored | **Awaits `SandboxManager.reset()`; drains session lists; restores env vars; detaches signal handlers** — closes a class of stale-state bugs (e.g. writes to `~/.bashrc` still being blocked after disable) |
 | Process-level teardown | `session_shutdown` only | Also `SIGINT`/`SIGTERM`/`SIGHUP`/`beforeExit` — OS-level sandbox is reset on hard kills too |
 | URL regex | Required two-dot domains (missed `x.com`-style hosts) | Fixed: `https?://[^\s/?#:]+` |
 | Tests | None published | 133 `bun:test` tests across 11 files, hermetic via tmpdir HOME |
+
+## Why the default rules are friendlier
+
+A few small choices that make the out-of-the-box experience a lot smoother than pi-sandbox's defaults:
+
+- **`~/.pi` is in `allowRead`.** pi-sandbox starts with `denyRead: ["/Users", "/home"]` and `allowRead: [".", "~/.config", "~/.local", "Library"]`. This blocks reads of pi's *own* config tree on Linux, which means skills, themes, prompt templates, and other extensions that live under `~/.pi/agent/...` are invisible to the sandboxed bash. We re-allow `~/.pi` by default, so pi can pull in its own resources cleanly while still blocking everything else under `/home`/`/Users`.
+- **Workspace-only by default.** `allowRead: ["."]` and `allowWrite: ["."]` mean every read and every write to the cwd is silently allowed, but anything outside it prompts. System paths (`/usr`, `/lib`, `/etc`, …) remain readable for tooling.
+- **Useful side effect of `.` semantics:** because `.` is resolved against pi's current working directory at start, **where you launch pi matters**:
+  - `cd ~ && pi` — the cwd is `~`, so `~/.bashrc` is inside `allowRead`/`allowWrite`. Tools can edit your shell init files freely.
+  - `cd ~/projects/foo && pi` — the cwd is the project, so `~/.bashrc` is outside `allowRead`/`allowWrite`. Tools get prompted (or blocked) if they try to touch it. The agent is cleanly confined to the project tree.
+
+  This makes the same install behave correctly for both "dotfiles tweaking" sessions (launched from home) and project work (launched from the project directory) without any per-session config flips.
 
 ## How it works
 
@@ -105,30 +117,37 @@ No match (no project key covers cwd):
 
 Lowercase letter → requires Enter to confirm. Uppercase letter → commits immediately. `[s]` (session) and `[esc]` (abort) don't require confirm in either case. Session allowances live in JS memory only — they're never written to disk and the agent has no way to inspect them.
 
-### `/sandbox` — in-pi inspection + configuration
+### `/sandbox` — inspect, toggle, configure
 
-`/sandbox` opens a TUI wizard. There used to be a separate `/sandbox-configure` command — inspection and configuration are now the same command, since you almost always want to see what's currently enforced before changing it.
+One command does all three. Run `/sandbox` and you see:
 
-1. **Scope picker** — the current effective config is rendered as a summary header (allowed domains, read/write paths, deny lists, session allowances, scope), then the picker lets you choose which file/key to edit. Same situation logic as the permission prompt: exact / parent / none, with a "Create new project config (copied from parent)" option when you're in a subfolder of an existing key, and an "Edit default config" option always available.
-2. **Field editor** — list of every `SandboxRuntimeConfig` field with current values. `↑↓` to navigate, `enter` to toggle/open, `s` to save, `?` to show advanced fields (`enableWeakerNestedSandbox`, `allowPty`, `mandatoryDenySearchDepth`, …), `esc`/`q` to quit.
-3. **List editor** — drill into list fields (`allowedDomains`, `allowRead`, …) to add (`a`) and delete (`d`) entries.
+1. **Current effective config summary** at the top — scope (project key or default), allowed domains, read/write paths, deny lists, in-memory session allowances.
+2. **`Disable sandbox`** (or `Enable sandbox` when off) as the **first selectable option**. Hitting Enter immediately at the menu toggles. No editor opens.
+3. **Scope options** below the toggle: edit project config, create new project config (when in a subfolder of an existing key), edit default config.
+
+This replaces what used to be three separate things — a `/sandbox-disable` slash command, a `/sandbox-configure` slash command, and a shift+tab shortcut that fought for the `app.thinking.cycle` binding. Now it's just `/sandbox` → Enter to flip off, or `/sandbox` → ↓ → Enter to edit.
+
+**You can also disable via the config** by setting `enabled: false` in `default.json` or your project entry (via `/sandbox` → ↓ to a scope → Enter → toggle the `enabled` field → `s` to save). That persists across sessions, unlike the lead-action toggle which is session-only.
+
+Field editor controls:
+- `↑↓` navigate
+- `enter` toggle a bool / open a list / edit a scalar
+- `s` save (validates against `SandboxRuntimeConfigSchema`; surfaces errors inline rather than writing invalid JSON)
+- `?` show advanced fields (`enableWeakerNestedSandbox`, `allowPty`, `mandatoryDenySearchDepth`, …)
+- `esc`/`q` quit
+
+List editor controls: `↑↓` navigate, `a` add (input prompt), `d` delete, `esc`/`b` back.
 
 Save validates the draft against `SandboxRuntimeConfigSchema` and surfaces validation errors inline rather than writing invalid JSON. The sandbox is reinitialized after each save so changes take effect immediately.
 
-### Status line + shift+tab
+### Status line
 
 The footer shows one of two states:
 
 - **Enabled** (accent colour): `🔒 Sandbox: 3 domains, 2 write paths`
 - **Disabled** (`disabled` in red): `Sandbox: disabled`
 
-**Shift+Tab toggles between them.** Toggling off runs the full disable path (see below); toggling on calls `SandboxManager.initialize` and re-attaches process-level teardown handlers. Both produce a notification.
-
-The default keybinding for `shift+tab` in pi is `app.thinking.cycle`. If you want shift+tab for sandbox toggling, unbind it in `~/.pi/agent/keybindings.json`:
-
-```json
-{ "app.thinking.cycle": [] }
-```
+Toggling via `/sandbox` updates this immediately. Toggling off runs the full disable path (see below); toggling on calls `SandboxManager.initialize` and re-attaches process-level teardown handlers.
 
 ### Disable cleanliness (the bug fix)
 
@@ -189,9 +208,10 @@ zackify-pi-sandbox/                  # folder on disk (kept unchanged for sync s
 
 | Trigger | Effect |
 |---|---|
-| `/sandbox` | Show effective config + scope + session allowances **and** open the configure wizard (summary is rendered above the scope picker) |
-| `shift+tab` | Toggle sandbox on/off (requires `app.thinking.cycle` unbound). Off does a full disable (no leaks; see "Disable cleanliness" above). |
-| `--no-sandbox` CLI flag | Start with the sandbox disabled |
+| `/sandbox` | All-in-one. Shows effective config summary, lets you toggle on/off (first option — Enter to fire), and lets you edit the default or project configs. |
+| `--no-sandbox` CLI flag | Start the session with the sandbox disabled |
+
+There is no keyboard shortcut for toggling. The single `/sandbox` Enter path is fast enough and avoids fighting with pi's built-in `app.thinking.cycle` (shift+tab) keybinding. To make the sandbox stay off across sessions, edit `enabled: false` in the relevant config via the same `/sandbox` wizard.
 
 ## Install
 
