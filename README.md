@@ -1,38 +1,18 @@
 # @oddsjam/pi-sandbox
 
-OS-level sandboxing for [pi](https://pi.dev/), built on top of [`@anthropic-ai/sandbox-runtime`](https://www.npmjs.com/package/@anthropic-ai/sandbox-runtime).
+A fully-configurable OS-level sandbox for [pi](https://pi.dev/), powered by [`@anthropic-ai/sandbox-runtime`](https://www.npmjs.com/package/@anthropic-ai/sandbox-runtime). Wraps every bash, read, write, and edit tool call with a permission gate so the agent can only touch what you've allowed.
 
 ![/sandbox configure wizard — current effective config rendered above the scope picker](./screenshots/sandbox-configure.png)
 
-Heavily inspired by [`pi-sandbox`](https://github.com/carderne/pi-sandbox) by Chris Arderne (which is itself derived from Mario Zechner's example extension in [`badlogic/pi-mono`](https://github.com/badlogic/pi-mono)). This extension keeps the core idea — wrap pi's bash/read/write/edit tools with a permission gate backed by an OS-level sandbox — and adds in-TUI configuration, a shift+tab toggle, and a different storage layout that's friendlier to syncing `~/.pi/` across machines.
+## What you get
 
-## What's different from pi-sandbox
+- **Sane defaults.** Out of the box the cwd is the agent's world: it can read and write anywhere under the directory where you launched pi, and nothing else. System paths (`/usr`, `/lib`, `/etc`) remain readable so common tooling works. Everything outside the cwd — your home directory, other projects, secret files — is blocked at both the OS level (for bash subprocesses) and the tool level (for the agent's `read`/`write`/`edit`).
+- **Where you start pi defines the sandbox.** Launch from `~` and the agent can edit your `.dotfiles` freely. Launch from `~/projects/foo` and the same agent is cleanly confined to that project — no config changes needed, just `cd` into the right place first.
+- **All configuration happens inside pi.** Run `/sandbox` to see the current effective config, toggle the sandbox on/off with one Enter press, or drop into a TUI wizard that edits allow/deny rules per-project or globally. No editing JSON by hand, no restarting pi.
+- **Built on Anthropic's upstream sandbox.** Linux uses bubblewrap + seccomp; macOS uses sandbox-exec. The enforcement layer is exactly what Anthropic uses internally — we only add the pi integration, the in-TUI wizard, and a few quality-of-life fixes around teardown and defaults.
+- **Pi's own files are protected for you.** `~/.pi/agent/auth.json` and `~/.pi/agent/mcp-oauth/` are denied by default even though `~/.pi` itself is allowed (so skills, themes, and other extensions still work). The agent can use pi's tools but can't exfiltrate your tokens.
 
-| Feature | pi-sandbox | @oddsjam/pi-sandbox |
-|---|---|---|
-| Sandbox runtime | [`@carderne/sandbox-runtime`](https://www.npmjs.com/package/@carderne/sandbox-runtime) (fork) | **[`@anthropic-ai/sandbox-runtime`](https://www.npmjs.com/package/@anthropic-ai/sandbox-runtime) (upstream, directly)** |
-| Config storage | `.pi/sandbox.json` (per project) + `~/.pi/agent/sandbox.json` (global) | `~/.pi/agent/sandbox/default.json` + `~/.pi/agent/sandbox/projects.json` (single user-level dir, no per-project files) |
-| Config matching | Merged global + project | Longest-prefix match, no merging — most specific wins |
-| Configure in pi | None — edit JSON by hand | **`/sandbox` TUI wizard** with current-config summary, scope picker, and per-field editor |
-| Toggle | `/sandbox-enable`, `/sandbox-disable` slash commands | **First option in `/sandbox`** is "Disable sandbox" / "Enable sandbox" — run `/sandbox`, hit Enter, done. No shortcut to remember, no built-in keybinding to free up. The footer shows `Sandbox: disabled` in red when off. |
-| Permission prompt | 4 options: abort / session / project / global | **5 options when in a subfolder** of an existing project key: adds "Allow for this project (new config)" which copies the parent entry under the cwd key |
-| Disable cleanliness | Async reset fire-and-forget; session lists keep state across re-enable; env mutations not restored | **Awaits `SandboxManager.reset()`; drains session lists; restores env vars; detaches signal handlers** — closes a class of stale-state bugs (e.g. writes to `~/.bashrc` still being blocked after disable) |
-| Process-level teardown | `session_shutdown` only | Also `SIGINT`/`SIGTERM`/`SIGHUP`/`beforeExit` — OS-level sandbox is reset on hard kills too |
-| URL regex | Required two-dot domains (missed `x.com`-style hosts) | Fixed: `https?://[^\s/?#:]+` |
-| Tests | None published | 133 `bun:test` tests across 11 files, hermetic via tmpdir HOME |
-
-## Why the default rules are friendlier
-
-A few small choices that make the out-of-the-box experience a lot smoother than pi-sandbox's defaults:
-
-- **`~/.pi` is in `allowRead`.** pi-sandbox starts with `denyRead: ["/Users", "/home"]` and `allowRead: [".", "~/.config", "~/.local", "Library"]`. This blocks reads of pi's *own* config tree on Linux, which means skills, themes, prompt templates, and other extensions that live under `~/.pi/agent/...` are invisible to the sandboxed bash. We re-allow `~/.pi` by default, so pi can pull in its own resources cleanly while still blocking everything else under `/home`/`/Users`.
-- **Pi's auth files are re-denied on top of that.** `~/.pi/agent/auth.json` (the primary token store) and `~/.pi/agent/mcp-oauth/` (MCP OAuth tokens) are in `denyRead` and `denyWrite` even though their parent `~/.pi` is allowed. sandbox-runtime gives file-level `denyRead` precedence over a directory-level `allowRead` ancestor, so the agent's bash can read its own extensions and skills but cannot exfiltrate the token store via `cat ~/.pi/agent/auth.json`.
-- **Workspace-only by default.** `allowRead: ["."]` and `allowWrite: ["."]` mean every read and every write to the cwd is silently allowed, but anything outside it prompts. System paths (`/usr`, `/lib`, `/etc`, …) remain readable for tooling.
-- **Useful side effect of `.` semantics:** because `.` is resolved against pi's current working directory at start, **where you launch pi matters**:
-  - `cd ~ && pi` — the cwd is `~`, so `~/.bashrc` is inside `allowRead`/`allowWrite`. Tools can edit your shell init files freely.
-  - `cd ~/projects/foo && pi` — the cwd is the project, so `~/.bashrc` is outside `allowRead`/`allowWrite`. Tools get prompted (or blocked) if they try to touch it. The agent is cleanly confined to the project tree.
-
-  This makes the same install behave correctly for both "dotfiles tweaking" sessions (launched from home) and project work (launched from the project directory) without any per-session config flips.
+Run `/sandbox` at any time to inspect what's allowed, what's denied, and tweak it. Everything's a few keystrokes away — you never have to leave pi to lock down or open up access.
 
 ## How it works
 
@@ -202,7 +182,7 @@ zackify-pi-sandbox/                  # folder on disk (kept unchanged for sync s
 │   ├── env.ts                    EnvTracker for safely mutating + restoring process.env
 │   ├── disable.ts                performDisable orchestration (testable)
 │   └── teardown.ts               attachTeardown for SIGINT/SIGTERM/SIGHUP/beforeExit
-└── test/                         11 files, 133 bun:test tests, hermetic tmpdir HOME
+└── test/                         12 files, 143 bun:test tests, hermetic tmpdir HOME
 ```
 
 ## Commands and keybindings
@@ -235,11 +215,41 @@ If `apply-seccomp: No such file or directory` appears, your `~/.pi/agent/sandbox
 ## Tests
 
 ```bash
-bun test         # 133 tests across 11 files
+bun test         # 143 tests across 12 files
 bun run typecheck
 ```
 
 Pure modules are unit-tested directly with synthetic state machines and a tmpdir HOME. TUI adapters and `SandboxManager` integration aren't exercised in `bun test` because they're stateful and platform-bound — verify those by running pi.
+
+## What's different from pi-sandbox
+
+Heavily inspired by [`pi-sandbox`](https://github.com/carderne/pi-sandbox) by Chris Arderne (which is itself derived from Mario Zechner's example extension in [`badlogic/pi-mono`](https://github.com/badlogic/pi-mono)). This extension keeps the core idea — wrap pi's bash/read/write/edit tools with a permission gate backed by an OS-level sandbox — and changes a few things:
+
+| Feature | pi-sandbox | @oddsjam/pi-sandbox |
+|---|---|---|
+| Sandbox runtime | [`@carderne/sandbox-runtime`](https://www.npmjs.com/package/@carderne/sandbox-runtime) (fork) | **[`@anthropic-ai/sandbox-runtime`](https://www.npmjs.com/package/@anthropic-ai/sandbox-runtime) (upstream, directly)** |
+| Config storage | `.pi/sandbox.json` (per project) + `~/.pi/agent/sandbox.json` (global) | `~/.pi/agent/sandbox/default.json` + `~/.pi/agent/sandbox/projects.json` (single user-level dir, no per-project files) |
+| Config matching | Merged global + project | Longest-prefix match, no merging — most specific wins |
+| Configure in pi | None — edit JSON by hand | **`/sandbox` TUI wizard** with current-config summary, scope picker, and per-field editor |
+| Toggle | `/sandbox-enable`, `/sandbox-disable` slash commands | **First option in `/sandbox`** is "Disable sandbox" / "Enable sandbox" — run `/sandbox`, hit Enter, done. No shortcut to remember, no built-in keybinding to free up. The footer shows `Sandbox: disabled` in red when off. |
+| Permission prompt | 4 options: abort / session / project / global | **5 options when in a subfolder** of an existing project key: adds "Allow for this project (new config)" which copies the parent entry under the cwd key |
+| Disable cleanliness | Async reset fire-and-forget; session lists keep state across re-enable; env mutations not restored | **Awaits `SandboxManager.reset()`; drains session lists; restores env vars; detaches signal handlers** — closes a class of stale-state bugs (e.g. writes to `~/.bashrc` still being blocked after disable) |
+| Process-level teardown | `session_shutdown` only | Also `SIGINT`/`SIGTERM`/`SIGHUP`/`beforeExit` — OS-level sandbox is reset on hard kills too |
+| URL regex | Required two-dot domains (missed `x.com`-style hosts) | Fixed: `https?://[^\s/?#:]+` |
+| Tests | None published | 143 `bun:test` tests across 12 files, hermetic via tmpdir HOME |
+
+### Default rules in detail
+
+A few choices that make the defaults smoother than pi-sandbox's:
+
+- **`~/.pi` is in `allowRead`.** pi-sandbox starts with `denyRead: ["/Users", "/home"]` and `allowRead: [".", "~/.config", "~/.local", "Library"]`. On Linux that blocks reads of pi's *own* config tree, so skills, themes, prompt templates, and other extensions that live under `~/.pi/agent/...` are invisible to the sandboxed bash. We re-allow `~/.pi` by default, so pi can pull in its own resources cleanly while everything else under `/home` / `/Users` stays blocked.
+- **Pi's auth files are re-denied on top of that.** `~/.pi/agent/auth.json` and `~/.pi/agent/mcp-oauth/` are in `denyRead` and `denyWrite` even though their parent `~/.pi` is allowed. sandbox-runtime gives file-level `denyRead` precedence over a directory-level `allowRead` ancestor, so the agent can read its own extensions and skills but cannot exfiltrate the token store via `cat ~/.pi/agent/auth.json`.
+- **Workspace-only by default.** `allowRead: ["."]` and `allowWrite: ["."]` mean every read and every write inside the cwd is silently allowed, but anything outside it prompts. System paths (`/usr`, `/lib`, `/etc`, …) remain readable for tooling.
+- **Where you launch pi matters.** Because `.` is resolved against pi's current working directory at start, the same install gives you two clean modes:
+  - `cd ~ && pi` — the cwd is `~`, so `~/.bashrc` is inside `allowRead`/`allowWrite`. Tools can edit your shell init files freely.
+  - `cd ~/projects/foo && pi` — the cwd is the project, so `~/.bashrc` is outside `allowRead`/`allowWrite`. Tools get prompted (or blocked) if they try to touch it. The agent is cleanly confined to the project tree.
+
+  No per-session config flips needed — just `cd` to the right scope before launching.
 
 ## Acknowledgements
 
