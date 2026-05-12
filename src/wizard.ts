@@ -17,7 +17,7 @@ import type { SandboxConfig } from "./config.ts";
 
 // ── Field definitions ───────────────────────────────────────────────────────
 
-export type FieldKind = "bool" | "list" | "string" | "number";
+export type FieldKind = "bool" | "list" | "string" | "number" | "record";
 
 export interface FieldDef {
   /** Display label and stable id (also the array index path). */
@@ -50,6 +50,7 @@ export const FIELDS: readonly FieldDef[] = [
   { id: "filesystem.allowWrite", label: "filesystem.allowWrite", kind: "list", path: ["filesystem", "allowWrite"] },
   { id: "filesystem.denyWrite", label: "filesystem.denyWrite", kind: "list", path: ["filesystem", "denyWrite"] },
   { id: "filesystem.allowGitConfig", label: "filesystem.allowGitConfig", kind: "bool", path: ["filesystem", "allowGitConfig"] },
+  { id: "ignoreViolations", label: "ignoreViolations", kind: "record", path: ["ignoreViolations"] },
   { id: "enableWeakerNestedSandbox", label: "enableWeakerNestedSandbox", kind: "bool", path: ["enableWeakerNestedSandbox"], advanced: true },
   { id: "enableWeakerNetworkIsolation", label: "enableWeakerNetworkIsolation", kind: "bool", path: ["enableWeakerNetworkIsolation"], advanced: true },
   { id: "allowPty", label: "allowPty", kind: "bool", path: ["allowPty"], advanced: true },
@@ -176,6 +177,77 @@ export function removeField(
   return next as Partial<SandboxConfig>;
 }
 
+/**
+ * Default value array assigned to newly-added record keys (ignoreViolations
+ * entries). Matches every path/violation the prefix could possibly emit.
+ */
+export const DEFAULT_RECORD_VALUE: readonly string[] = ["*"];
+
+/** Read a record-field as a plain object, or {} if missing/wrong type. */
+function getRecord(
+  config: Partial<SandboxConfig>,
+  field: FieldDef,
+): Record<string, string[]> {
+  const cur = getField(config, field);
+  if (cur === null || typeof cur !== "object" || Array.isArray(cur)) return {};
+  // Filter to only string-array values; tolerate stray junk.
+  const out: Record<string, string[]> = {};
+  for (const [k, v] of Object.entries(cur as Record<string, unknown>)) {
+    if (Array.isArray(v) && v.every((x) => typeof x === "string")) {
+      out[k] = v as string[];
+    }
+  }
+  return out;
+}
+
+/** Sorted list of keys from a record field. Pure helper for the UI. */
+export function recordKeys(config: Partial<SandboxConfig>, field: FieldDef): string[] {
+  return Object.keys(getRecord(config, field)).sort();
+}
+
+/** Get the value array for a record key, or [] if missing. */
+export function recordValue(
+  config: Partial<SandboxConfig>,
+  field: FieldDef,
+  key: string,
+): readonly string[] {
+  const rec = getRecord(config, field);
+  return rec[key] ?? [];
+}
+
+/**
+ * Add a key to a record field. Trims whitespace. Empty → no-op. Existing
+ * keys are left alone (no overwrite of the value array). New keys are
+ * seeded with `DEFAULT_RECORD_VALUE` (`["*"]`).
+ */
+export function addRecordKey(
+  config: Partial<SandboxConfig>,
+  field: FieldDef,
+  key: string,
+): Partial<SandboxConfig> {
+  const trimmed = key.trim();
+  if (!trimmed) return config;
+  const rec = getRecord(config, field);
+  if (Object.prototype.hasOwnProperty.call(rec, trimmed)) return config;
+  const next = { ...rec, [trimmed]: [...DEFAULT_RECORD_VALUE] };
+  return setField(config, field, next);
+}
+
+/** Remove a key from a record field. Missing key → no-op. */
+export function removeRecordKey(
+  config: Partial<SandboxConfig>,
+  field: FieldDef,
+  key: string,
+): Partial<SandboxConfig> {
+  const rec = getRecord(config, field);
+  if (!Object.prototype.hasOwnProperty.call(rec, key)) return config;
+  const next = { ...rec };
+  delete next[key];
+  // Empty record → drop the field entirely so it doesn't clutter the JSON.
+  if (Object.keys(next).length === 0) return removeField(config, field);
+  return setField(config, field, next);
+}
+
 /** Add an entry to a list field. Dedupes. Trims whitespace. Empty → no-op. */
 export function addListEntry(
   config: Partial<SandboxConfig>,
@@ -209,6 +281,13 @@ export function formatFieldValue(field: FieldDef, value: unknown): string {
   if (field.kind === "list") {
     const arr = Array.isArray(value) ? value : [];
     return `(${arr.length} ${arr.length === 1 ? "item" : "items"}) →`;
+  }
+  if (field.kind === "record") {
+    const n =
+      value !== null && typeof value === "object" && !Array.isArray(value)
+        ? Object.keys(value as Record<string, unknown>).length
+        : 0;
+    return `(${n} ${n === 1 ? "prefix" : "prefixes"}) →`;
   }
   if (field.kind === "bool") {
     if (value === true) return "true";
