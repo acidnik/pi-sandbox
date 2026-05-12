@@ -53,6 +53,8 @@ jobs:
           npm version "$VERSION" --no-git-tag-version --allow-same-version
 
       - name: Publish to npm
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance  # Provenance is recommended with OIDC
+        # Authentication is handled by OIDC trusted publishing (see the
+        # `permissions: id-token: write` block above and the trusted-publisher
+        # config on npm). `access: public` comes from publishConfig in
+        # package.json, so no flag is needed here.
