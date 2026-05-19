@@ -206,10 +206,14 @@ export default function (pi: ExtensionAPI): void {
     try {
       await SandboxManager.initialize(
         {
+          network: {
+            allowedDomains: [],
+            deniedDomains: [],
+          },
           filesystem: effective.filesystem,
           ignoreViolations: effective.ignoreViolations,
           enableWeakerNestedSandbox: effective.enableWeakerNestedSandbox,
-          enableWeakerNetworkIsolation: effective.enableWeakerNetworkIsolation ?? true,
+          enableWeakerNetworkIsolation: true,
           ripgrep: effective.ripgrep,
           mandatoryDenySearchDepth: effective.mandatoryDenySearchDepth,
           allowPty: effective.allowPty,
@@ -217,6 +221,7 @@ export default function (pi: ExtensionAPI): void {
           bwrapPath: effective.bwrapPath,
           socatPath: effective.socatPath,
         },
+      );
 
       // Make Node's built-in fetch honour HTTP_PROXY env vars in this process
       // and any child Node processes that inherit the environment.
