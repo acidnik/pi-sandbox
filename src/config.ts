@@ -76,7 +76,7 @@ export function getConfigPaths(home: string = homedir()): ConfigPaths {
  * Every network access prompts because allowedDomains is empty.
  */
 export const BUILTIN_DEFAULT_CONFIG: SandboxConfig = {
-  enabled: true,
+  enabled: false,
   filesystem: {
     denyRead: ["/Users", "/home", "~/.pi/agent/auth.json", "~/.pi/agent/mcp-oauth"],
     allowRead: [".", "~/.pi"],
