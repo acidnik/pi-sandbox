@@ -77,10 +77,6 @@ export function getConfigPaths(home: string = homedir()): ConfigPaths {
  */
 export const BUILTIN_DEFAULT_CONFIG: SandboxConfig = {
   enabled: true,
-  network: {
-    allowedDomains: [],
-    deniedDomains: [],
-  },
   filesystem: {
     denyRead: ["/Users", "/home", "~/.pi/agent/auth.json", "~/.pi/agent/mcp-oauth"],
     allowRead: [".", "~/.pi"],

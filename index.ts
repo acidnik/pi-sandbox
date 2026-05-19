@@ -27,13 +27,12 @@ import type {
 
 import { homedir } from "node:os";
 
-import { SandboxManager, type SandboxAskCallback } from "@anthropic-ai/sandbox-runtime";
+import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import {
   createBashToolDefinition,
   isToolCallEventType,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-
 import { createSandboxedBashOps } from "./src/bash-ops.ts";
 import {
   type SandboxConfig,
@@ -55,10 +54,6 @@ import {
 } from "./src/config.ts";
 import { performDisable } from "./src/disable.ts";
 import { createEnvTracker } from "./src/env.ts";
-import {
-  domainIsAllowed,
-  extractDomainsFromCommand,
-} from "./src/domains.ts";
 import { extractBlockedWritePath } from "./src/output.ts";
 import { canonicalizePath, matchesPattern, shouldPromptForWrite } from "./src/paths.ts";
 import {
@@ -71,10 +66,6 @@ import { renderDisabledParts, renderStatus } from "./src/status.ts";
 import { buildSummaryLines } from "./src/summary.ts";
 import { attachTeardown } from "./src/teardown.ts";
 import { runWizard } from "./src/wizard-ui.ts";
-
-function createNetworkAskCallback(allowedDomains: readonly string[]): SandboxAskCallback {
-  return async ({ host }) => domainIsAllowed(host, allowedDomains);
-}
 
 function isSupportedPlatform(): boolean {
   return process.platform === "darwin" || process.platform === "linux";
@@ -208,14 +199,13 @@ export default function (pi: ExtensionAPI): void {
       return false;
     }
     const { effective } = loadEffective(cwd);
-    if (!effective.network || !effective.filesystem) {
+    if (!effective.filesystem) {
       ctx?.ui.notify("Sandbox config is incomplete (missing network or filesystem). Use /sandbox-configure.", "warning");
       return false;
     }
     try {
       await SandboxManager.initialize(
         {
-          network: effective.network,
           filesystem: effective.filesystem,
           ignoreViolations: effective.ignoreViolations,
           enableWeakerNestedSandbox: effective.enableWeakerNestedSandbox,
@@ -227,8 +217,6 @@ export default function (pi: ExtensionAPI): void {
           bwrapPath: effective.bwrapPath,
           socatPath: effective.socatPath,
         },
-        createNetworkAskCallback(effective.network.allowedDomains ?? []),
-      );
 
       // Make Node's built-in fetch honour HTTP_PROXY env vars in this process
       // and any child Node processes that inherit the environment.
@@ -387,28 +375,6 @@ export default function (pi: ExtensionAPI): void {
     const { base, effective } = loadEffective(ctx.cwd);
     if (base.enabled === false) return;
 
-    // Network pre-check for bash
-    if (flags.initialized.value && isToolCallEventType("bash", event)) {
-      const domains = extractDomainsFromCommand(event.input.command);
-      const allowed = effective.network?.allowedDomains ?? [];
-      for (const domain of domains) {
-        if (!domainIsAllowed(domain, allowed)) {
-          const status = await promptAndApply(
-            ctx,
-            `🌐 Network blocked: "${domain}" is not in allowedDomains`,
-            "domain",
-            domain,
-          );
-          if (status === "blocked") {
-            return {
-              block: true,
-              reason: `Network access to "${domain}" is blocked (not in allowedDomains).`,
-            };
-          }
-        }
-      }
-    }
-
     // Read tool — every read is prompted unless already in allowRead.
     if (isToolCallEventType("read", event)) {
       const filePath = canonicalizePath(event.input.path, home);
@@ -456,33 +422,10 @@ export default function (pi: ExtensionAPI): void {
     return undefined;
   });
 
-  // ── user_bash (network pre-check for !cmd) ─────────────────────────────────
+  // ── user_bash (sandboxed bash for !cmd) ─────────────────────────────────────
 
   pi.on("user_bash", async (event, ctx) => {
     if (!flags.enabled.value || !flags.initialized.value) return;
-    const { effective } = loadEffective(ctx.cwd);
-    const domains = extractDomainsFromCommand(event.command);
-    const allowed = effective.network?.allowedDomains ?? [];
-    for (const domain of domains) {
-      if (!domainIsAllowed(domain, allowed)) {
-        const status = await promptAndApply(
-          ctx,
-          `🌐 Network blocked: "${domain}" is not in allowedDomains`,
-          "domain",
-          domain,
-        );
-        if (status === "blocked") {
-          return {
-            result: {
-              output: `Blocked: "${domain}" is not in allowedDomains. Use /sandbox-configure to review your config.`,
-              exitCode: 1,
-              cancelled: false,
-              truncated: false,
-            },
-          };
-        }
-      }
-    }
     return { operations: createSandboxedBashOps(userShellPath) };
   });
 
